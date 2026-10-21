@@ -1,0 +1,105 @@
+name: local-llm-doc-assistant
+
+x-backend-env: &backend-env
+  APP_ENV: ${APP_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-docassist}:${POSTGRES_PASSWORD:-docassist}@postgres:5432/${POSTGRES_DB:-docassist}
+  STORAGE_DIR: /data/documents
+  MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+  DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-openai}
+  DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-gpt-4o-mini}
+  DEFAULT_EMBEDDING_PROVIDER: ${DEFAULT_EMBEDDING_PROVIDER:-openai}
+  DEFAULT_EMBEDDING_MODEL: ${DEFAULT_EMBEDDING_MODEL:-text-embedding-3-small}
+  LOCAL_PROVIDER_TYPE: ${LOCAL_PROVIDER_TYPE:-ollama}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+  VLLM_BASE_URL: ${VLLM_BASE_URL:-}
+  LOCAL_API_KEY: ${LOCAL_API_KEY:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  OCR_PROVIDER: ${OCR_PROVIDER:-tesseract}
+  OCR_BASE_URL: ${OCR_BASE_URL:-http://ocr:8800}
+  LOCAL_ONLY_MODE: ${LOCAL_ONLY_MODE:-false}
+  CHUNK_SIZE: ${CHUNK_SIZE:-1200}
+  CHUNK_OVERLAP: ${CHUNK_OVERLAP:-180}
+  RETRIEVAL_TOP_K: ${RETRIEVAL_TOP_K:-6}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+
+services:
+  postgres:
+    # pgvector is the vector database; it lives in the same Postgres instance.
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-docassist}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-docassist}
+      POSTGRES_DB: ${POSTGRES_DB:-docassist}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-docassist} -d ${POSTGRES_DB:-docassist}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment: *backend-env
+    volumes:
+      - document-storage:/data/documents
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '${BACKEND_PORT:-8000}:8000'
+
+  document-worker:
+    build: ./backend
+    restart: unless-stopped
+    command: ['python', 'worker.py']
+    # Shares the backend image but serves no HTTP, so the image's healthcheck
+    # does not apply here.
+    healthcheck:
+      disable: true
+    environment: *backend-env
+    volumes:
+      - document-storage:/data/documents
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ocr:
+    build: ./ocr-service
+    restart: unless-stopped
+    ports:
+      - '${OCR_PORT:-8800}:8800'
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    depends_on:
+      - backend
+    ports:
+      - '${FRONTEND_PORT:-3000}:3000'
+
+  ollama:
+    # Started only with the local-ai profile; OpenAI is external and never containerised.
+    image: ollama/ollama:0.5.4
+    profiles: ['local-ai']
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - '${OLLAMA_PORT:-11434}:11434'
+
+volumes:
+  postgres-data:
+  document-storage:
+  ollama-models:
